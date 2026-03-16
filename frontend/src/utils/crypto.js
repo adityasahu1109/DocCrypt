@@ -128,8 +128,8 @@ export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom
     const exportedPublicKey = await window.crypto.subtle.exportKey("jwk", keyPair.publicKey);
     await saveKeyToBackend(docId, exportedPublicKey, docHashHex, signatureBase64);
 
-    // 5. Construct QR Payload
-    const payloadJson = JSON.stringify({ docId: docId, hash: docHashHex, sig: signatureBase64, appended: qrPlacement === 'New Page (Appended)' });
+    // 5. Construct QR Payload (Minified to solve jsQR density blurring issues)
+    const payloadJson = JSON.stringify({ docId: docId });
     
     // Generate QR Data URL using a temporary DOM element (standard qrcode.js behavior)
     const tempDiv = document.createElement('div');
@@ -312,15 +312,16 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
                 return resolve({ success: false, error: "QR code contents are not a valid DocCrypt payload.", resultData: null });
             }
 
-            setStatusCallback("Contacting Trust Registry to fetch Public Key...");
-            const jwk = await loadKeyFromBackend(payload.docId);
+            setStatusCallback("Contacting Trust Registry to fetch Ledger Data...");
+            const record = await lookupRecordFromBackend(payload.docId);
             
-            if (!jwk) {
-                return resolve({ success: false, error: "VERIFICATION FAILED: This Document ID does not exist in the Trust Registry.", resultData: null });
+            if (!record) {
+                return resolve({ success: false, error: "VERIFICATION FAILED: This Document ID does not exist in the decentralized ledger.", resultData: null });
             }
 
             let verificationKey;
             try {
+                const jwk = JSON.parse(record.public_key_jwk);
                 verificationKey = await window.crypto.subtle.importKey("jwk", jwk, { name: "RSA-PSS", hash: "SHA-256" }, true, ["verify"]);
             } catch(e) {
                 return resolve({ success: false, error: "Failed to import the retrieved public key.", resultData: null });
@@ -335,7 +336,7 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
                 fileHashHex = bufferToHex(currentHashBuffer);
                 
                 setStatusCallback(`Uploaded File Hash: ${fileHashHex.substring(0,32)}...`);
-                if (fileHashHex === payload.hash) {
+                if (fileHashHex === record.document_hash) {
                     setStatusCallback("Uploaded file matches the authentic payload exactly (Original Document).");
                     isOriginal = true;
                 } else {
@@ -346,9 +347,9 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
             // --- Final strict Cryptographic Verification ---
             setStatusCallback("Executing strict RSA-PSS Signature Verification...");
             const textEncoder = new TextEncoder();
-            const hashDataBuffer = textEncoder.encode(payload.hash);
+            const hashDataBuffer = textEncoder.encode(record.document_hash);
             
-            const signatureBuffer = base64ToArrayBuffer(payload.sig);
+            const signatureBuffer = base64ToArrayBuffer(record.signature_base64);
             const isValid = await window.crypto.subtle.verify(
                 { name: "RSA-PSS", saltLength: 32 },
                 verificationKey,
@@ -360,15 +361,16 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
                 return resolve({ 
                     success: true, 
                     resultData: {
-                        docId: payload.docId,
-                        originalHash: payload.hash,
+                        docId: record.document_id,
+                        originalHash: record.document_hash,
                         fileHashHex: fileHashHex,
                         isOriginal: isOriginal,
-                        signature: payload.sig
+                        dateIssued: new Date(record.created_at).toLocaleString(),
+                        signature: record.signature_base64
                     }
                 });
             } else {
-                return resolve({ success: false, error: "Signature tampering detected. This QR code is invalid.", resultData: null });
+                return resolve({ success: false, error: "Ledger Database Corruption or Forgery detected. Signature Validation Failed.", resultData: null });
             }
 
         } catch(err) {
