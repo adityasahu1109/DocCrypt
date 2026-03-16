@@ -60,14 +60,16 @@ export async function loadKeyFromBackend(documentId) {
     }
 }
 
-export async function saveKeyToBackend(documentId, jwk) {
+export async function saveKeyToBackend(documentId, jwk, documentHash, signatureBase64) {
     try {
         const response = await fetch(`${BACKEND_URL}/register-key`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 document_id: documentId,
-                public_key_jwk: JSON.stringify(jwk)
+                public_key_jwk: JSON.stringify(jwk),
+                document_hash: documentHash,
+                signature_base64: signatureBase64
             })
         });
         const result = await response.json();
@@ -76,6 +78,18 @@ export async function saveKeyToBackend(documentId, jwk) {
     } catch (err) {
         console.error("Failed saving to backend:", err);
         return false;
+    }
+}
+
+export async function lookupRecordFromBackend(query) {
+    try {
+        const response = await fetch(`${BACKEND_URL}/lookup-record?query=${encodeURIComponent(query)}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        return data;
+    } catch (err) {
+        console.error("Failed looking up record from backend:", err);
+        return null;
     }
 }
 
@@ -94,27 +108,25 @@ export async function generateKeys() {
 }
 
 export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom-Right', issuerAuthData = null) {
-    // 1. Extract digital text from the original PDF
-    const extractedText = await extractTextFromPdfBytes(fileBuffer, false);
-    const textEncoder = new TextEncoder();
-    const textDataBuffer = textEncoder.encode(extractedText);
-
-    // 2. Hash the raw TEXT
-    const docHashBuffer = await window.crypto.subtle.digest("SHA-256", textDataBuffer);
+    // 1. Hash the raw PHYSICAL bytes of the original PDF (Collision-Proof)
+    const docHashBuffer = await window.crypto.subtle.digest("SHA-256", fileBuffer);
     const docHashHex = bufferToHex(docHashBuffer);
     
-    // 3. Sign the Hash (by signing the textDataBuffer)
+    // 2. Sign the textual Hex string of the hash
+    const textEncoder = new TextEncoder();
+    const hashDataBuffer = textEncoder.encode(docHashHex);
+    
     const signatureBuffer = await window.crypto.subtle.sign(
         { name: "RSA-PSS", saltLength: 32 },
         keyPair.privateKey,
-        textDataBuffer
+        hashDataBuffer
     );
     const signatureBase64 = arrayBufferToBase64(signatureBuffer);
     
-    // 4. Save Public Key
+    // 3. Save Public Key + Ledger Data
     const docId = generateDocId();
     const exportedPublicKey = await window.crypto.subtle.exportKey("jwk", keyPair.publicKey);
-    await saveKeyToBackend(docId, exportedPublicKey);
+    await saveKeyToBackend(docId, exportedPublicKey, docHashHex, signatureBase64);
 
     // 5. Construct QR Payload
     const payloadJson = JSON.stringify({ docId: docId, hash: docHashHex, sig: signatureBase64, appended: qrPlacement === 'New Page (Appended)' });
@@ -314,61 +326,97 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
                 return resolve({ success: false, error: "Failed to import the retrieved public key.", resultData: null });
             }
 
-            // --- Cryptographic Text-Content Re-assembly ---
-            setStatusCallback("Reconstructing digital text content block...");
-            let verificationArrayBuffer = null;
-
+            // --- File Matching vs Payload Hash ---
+            let isOriginal = false;
+            let fileHashHex = "";
             if (verifyPdfArrayBuffer) {
-                setStatusCallback("Extracting raw text from original document pages...");
+                setStatusCallback("Hashing uploaded physical document bytes...");
+                const currentHashBuffer = await window.crypto.subtle.digest("SHA-256", verifyPdfArrayBuffer);
+                fileHashHex = bufferToHex(currentHashBuffer);
                 
-                // If the stamp was appended as a new page, we MUST skip the last page during extraction
-                // to match the original document text hash exactly without trailing empty page newlines.
-                const shouldSkipLast = payload.appended === true;
-                const extractedText = await extractTextFromPdfBytes(verifyPdfArrayBuffer, shouldSkipLast);
-                
-                const textEncoder = new TextEncoder();
-                verificationArrayBuffer = textEncoder.encode(extractedText);
-                
-                const currentHashBuffer = await window.crypto.subtle.digest("SHA-256", verificationArrayBuffer);
-                const currentHashHex = bufferToHex(currentHashBuffer);
-                
-                setStatusCallback(`Extracted Text Hash: ${currentHashHex.substring(0,32)}...`);
-                
-                if (currentHashHex === payload.hash) {
-                    setStatusCallback("Document text hash matches payload flawlessly.");
+                setStatusCallback(`Uploaded File Hash: ${fileHashHex.substring(0,32)}...`);
+                if (fileHashHex === payload.hash) {
+                    setStatusCallback("Uploaded file matches the authentic payload exactly (Original Document).");
+                    isOriginal = true;
                 } else {
-                    return resolve({ success: false, error: "Document text hash mismatch. Content may have been altered.", resultData: null });
+                    setStatusCallback("Uploaded file is structurally modified (e.g., Stamped) from the Original.");
                 }
             } 
 
             // --- Final strict Cryptographic Verification ---
-            if (verificationArrayBuffer) {
-                const signatureBuffer = base64ToArrayBuffer(payload.sig);
-                const isValid = await window.crypto.subtle.verify(
-                    { name: "RSA-PSS", saltLength: 32 },
-                    verificationKey,
-                    signatureBuffer,
-                    verificationArrayBuffer
-                );
-                
-                if (isValid) {
-                    return resolve({ 
-                        success: true, 
-                        resultData: {
-                            docId: payload.docId,
-                            originalHash: payload.hash
-                        }
-                    });
-                } else {
-                    return resolve({ success: false, error: "Signature tampering detected.", resultData: null });
-                }
+            setStatusCallback("Executing strict RSA-PSS Signature Verification...");
+            const textEncoder = new TextEncoder();
+            const hashDataBuffer = textEncoder.encode(payload.hash);
+            
+            const signatureBuffer = base64ToArrayBuffer(payload.sig);
+            const isValid = await window.crypto.subtle.verify(
+                { name: "RSA-PSS", saltLength: 32 },
+                verificationKey,
+                signatureBuffer,
+                hashDataBuffer
+            );
+            
+            if (isValid) {
+                return resolve({ 
+                    success: true, 
+                    resultData: {
+                        docId: payload.docId,
+                        originalHash: payload.hash,
+                        fileHashHex: fileHashHex,
+                        isOriginal: isOriginal,
+                        signature: payload.sig
+                    }
+                });
             } else {
-                return resolve({ success: false, error: "Could not extract text buffer to verify signature.", resultData: null });
+                return resolve({ success: false, error: "Signature tampering detected. This QR code is invalid.", resultData: null });
             }
 
         } catch(err) {
             console.error(err);
             return resolve({ success: false, error: `Cryptographic failure: ${err.message}`, resultData: null });
+        }
+    });
+}
+
+export async function verifyByManualHash(query, setStatusCallback) {
+    return new Promise(async (resolve) => {
+        try {
+            setStatusCallback(`Looking up Trust Registry for identifier: ${query}...`);
+            const record = await lookupRecordFromBackend(query);
+            if (!record) return resolve({ success: false, error: "Identifier not found in the decentralized ledger." });
+            
+            setStatusCallback(`Ledger match found. Registered by Doc ID: ${record.document_id}`);
+            const jwk = JSON.parse(record.public_key_jwk);
+            const verificationKey = await window.crypto.subtle.importKey("jwk", jwk, { name: "RSA-PSS", hash: "SHA-256" }, true, ["verify"]);
+            
+            setStatusCallback("Verifying ledger signature against ledger hash...");
+            const textEncoder = new TextEncoder();
+            const hashDataBuffer = textEncoder.encode(record.document_hash);
+            const signatureBuffer = base64ToArrayBuffer(record.signature_base64);
+            
+            const isValid = await window.crypto.subtle.verify(
+                { name: "RSA-PSS", saltLength: 32 },
+                verificationKey,
+                signatureBuffer,
+                hashDataBuffer
+            );
+            
+            if (isValid) {
+                return resolve({ 
+                    success: true, 
+                    resultData: { 
+                        docId: record.document_id, 
+                        originalHash: record.document_hash, 
+                        dateIssued: new Date(record.created_at).toLocaleString(),
+                        isOriginal: true, 
+                        signature: record.signature_base64 
+                    } 
+                });
+            } else {
+                return resolve({ success: false, error: "Ledger Database Corruption or Forgery detected. Signature Validation Failed." });
+            }
+        } catch (e) {
+            return resolve({ success: false, error: `Manual Cryptographic verify failed: ${e.message}` });
         }
     });
 }

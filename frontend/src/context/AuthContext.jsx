@@ -77,8 +77,35 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  const updateProfile = async (profileData) => {
+    try {
+        const payload = {
+            email: user.email,
+            firstName: profileData.firstName,
+            lastName: profileData.lastName,
+            orgName: profileData.orgName
+        };
+        const response = await fetch(`${BACKEND_URL}/update-profile`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (response.ok) {
+            localStorage.setItem('mockUser', JSON.stringify(data.user));
+            setUser(data.user);
+            return true;
+        } else {
+            throw new Error(data.detail || 'Profile update failed');
+        }
+    } catch (err) {
+        console.error("Profile Update Error:", err);
+        throw err;
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, login, signup, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, signup, logout, updateProfile, loading }}>
       {!loading && children}
     </AuthContext.Provider>
   );

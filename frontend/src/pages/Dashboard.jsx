@@ -5,7 +5,7 @@ import { Button } from '../components/ui/Button';
 import { FileSignature, UploadCloud, Clock, Settings, FileText, CheckCircle, History } from 'lucide-react';
 
 export default function Dashboard() {
-  const { user, login } = useAuth();
+  const { user, login, updateProfile } = useAuth();
   const [activeTab, setActiveTab] = useState('sign');
   
   // Signing State
@@ -89,12 +89,22 @@ export default function Dashboard() {
     }
   };
 
-  const handleProfileUpdate = (e) => {
+  const handleProfileUpdate = async (e) => {
       e.preventDefault();
-      // Mock update
-      const updatedUser = { ...user, ...profileData };
-      localStorage.setItem('mockUser', JSON.stringify(updatedUser));
-      setProfileMsg('Profile updated successfully.');
+      try {
+          const parts = (profileData.name || '').trim().split(' ');
+          const fName = parts[0] || '';
+          const lName = parts.slice(1).join(' ') || '';
+          
+          await updateProfile({
+              firstName: fName,
+              lastName: lName,
+              orgName: profileData.orgName
+          });
+          setProfileMsg('Profile updated successfully.');
+      } catch(err) {
+          setProfileMsg('Update failed: ' + err.message);
+      }
       setTimeout(() => setProfileMsg(''), 3000);
   }
 

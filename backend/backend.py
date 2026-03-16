@@ -27,11 +27,21 @@ def hash_password(password: str) -> str:
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Create the table mapping document IDs to public keys
+    
+    # Check if the table has the new schema columns. If not, drop and recreate it.
+    try:
+        cursor.execute("SELECT document_hash FROM public_keys LIMIT 1")
+    except sqlite3.OperationalError:
+        print("Migrating trust_registry schema: dropping old public_keys table.")
+        cursor.execute("DROP TABLE IF EXISTS public_keys")
+        
+    # Create the table mapping document IDs to public keys and hashes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS public_keys (
             document_id TEXT PRIMARY KEY,
             public_key_jwk TEXT NOT NULL,
+            document_hash TEXT NOT NULL,
+            signature_base64 TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -63,6 +73,8 @@ init_db()
 class KeyRegistration(BaseModel):
     document_id: str
     public_key_jwk: str
+    document_hash: str
+    signature_base64: str
 
 class UserSignup(BaseModel):
     email: str
@@ -76,6 +88,52 @@ class UserSignup(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+
+class UserUpdate(BaseModel):
+    email: str
+    firstName: str = None
+    lastName: str = None
+    orgName: str = None
+
+@app.post("/update-profile")
+async def update_profile(update: UserUpdate):
+    try:
+        conn = sqlite3.connect(USERS_DB)
+        cursor = conn.cursor()
+        
+        # We use email to find the user
+        cursor.execute("SELECT user_type, first_name, last_name, org_name, contact_person FROM users WHERE email=?", (update.email,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        user_type, first_name, last_name, org_name, contact_person = row
+        
+        # Update fields depending on user type
+        new_first = update.firstName if update.firstName is not None else first_name
+        new_last = update.lastName if update.lastName is not None else last_name
+        new_org = update.orgName if update.orgName is not None else org_name
+        
+        cursor.execute(
+            "UPDATE users SET first_name=?, last_name=?, org_name=? WHERE email=?",
+            (new_first, new_last, new_org, update.email)
+        )
+        conn.commit()
+        
+        profile = {
+            "email": update.email,
+            "type": user_type,
+            "firstName": new_first,
+            "lastName": new_last,
+            "orgName": new_org,
+            "contactPerson": contact_person,
+            "name": f"{new_first} {new_last}" if user_type == 'Individual' else f"{new_org} ({contact_person})"
+        }
+        return {"status": "success", "user": profile}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
 
 @app.post("/signup")
 async def signup(user: UserSignup):
@@ -145,8 +203,8 @@ async def register_key(registration: KeyRegistration):
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO public_keys (document_id, public_key_jwk) VALUES (?, ?)",
-            (registration.document_id, registration.public_key_jwk)
+            "INSERT INTO public_keys (document_id, public_key_jwk, document_hash, signature_base64) VALUES (?, ?, ?, ?)",
+            (registration.document_id, registration.public_key_jwk, registration.document_hash, registration.signature_base64)
         )
         conn.commit()
         return {"status": "success", "message": f"Key registered for document {registration.document_id}"}
@@ -172,6 +230,34 @@ async def get_key(document_id: str):
             raise HTTPException(status_code=404, detail="Key not found for document ID")
             
         return {"document_id": document_id, "public_key_jwk": result[0]}
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.get("/lookup-record")
+async def lookup_record(query: str):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Search by Document ID exactly OR search by Document Hash exactly
+        cursor.execute(
+            "SELECT document_id, public_key_jwk, document_hash, signature_base64, created_at FROM public_keys WHERE document_id = ? OR document_hash = ?",
+            (query, query)
+        )
+        result = cursor.fetchone()
+        
+        if result is None:
+            raise HTTPException(status_code=404, detail="No cryptographic record found for this identifier.")
+            
+        return {
+            "document_id": result[0],
+            "public_key_jwk": result[1],
+            "document_hash": result[2],
+            "signature_base64": result[3],
+            "created_at": result[4]
+        }
     except sqlite3.Error as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
