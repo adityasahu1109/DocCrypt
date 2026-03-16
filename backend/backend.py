@@ -92,7 +92,11 @@ async def signup(user: UserSignup):
         # Return user profile (without password)
         profile = {
             "email": user.email,
-            "userType": user.userType,
+            "type": user.userType,
+            "firstName": user.firstName,
+            "lastName": user.lastName,
+            "orgName": user.orgName,
+            "contactPerson": user.contactPerson,
             "name": f"{user.firstName} {user.lastName}" if user.userType == 'Individual' else f"{user.orgName} ({user.contactPerson})"
         }
         return {"status": "success", "user": profile}
@@ -118,7 +122,11 @@ async def login(user: UserLogin):
             email, user_type, first_name, last_name, org_name, contact_person = row
             profile = {
                 "email": email,
-                "userType": user_type,
+                "type": user_type,
+                "firstName": first_name,
+                "lastName": last_name,
+                "orgName": org_name,
+                "contactPerson": contact_person,
                 "name": f"{first_name} {last_name}" if user_type == 'Individual' else f"{org_name} ({contact_person})"
             }
             return {"status": "success", "user": profile}

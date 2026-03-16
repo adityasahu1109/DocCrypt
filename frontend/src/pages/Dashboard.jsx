@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Card, CardHeader, CardTitle, CardContent, Input } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
-import { FileSignature, UploadCloud, Clock, Settings, FileText, CheckCircle } from 'lucide-react';
+import { FileSignature, UploadCloud, Clock, Settings, FileText, CheckCircle, History } from 'lucide-react';
 
 export default function Dashboard() {
   const { user, login } = useAuth();
@@ -24,9 +24,9 @@ export default function Dashboard() {
 
   // Fetch mock history on mount
   useEffect(() => {
-    const mockHistory = JSON.parse(localStorage.getItem('mockHistory') || '[]');
+    const mockHistory = JSON.parse(localStorage.getItem(`mockHistory_${user.email}`) || '[]');
     setHistory(mockHistory);
-  }, []);
+  }, [user.email]);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -56,7 +56,7 @@ export default function Dashboard() {
         const fileBuffer = await file.arrayBuffer();
 
         // Perform the actual cryptographic signing and PDF modification
-        const stampedBlob = await signAndStampPDF(fileBuffer, currentKeyPair, qrPlacement);
+        const stampedBlob = await signAndStampPDF(fileBuffer, currentKeyPair, qrPlacement, user);
         
         // Trigger download of the newly stamped PDF
         const url = URL.createObjectURL(stampedBlob);
@@ -77,9 +77,10 @@ export default function Dashboard() {
         };
         const updatedHistory = [newRecord, ...history];
         setHistory(updatedHistory);
-        localStorage.setItem('mockHistory', JSON.stringify(updatedHistory));
+        localStorage.setItem(`mockHistory_${user.email}`, JSON.stringify(updatedHistory));
         
         setFile(null);
+        document.getElementById('fileUpload').value = '';
     } catch (err) {
         console.error("Signing failed", err);
         alert("Cryptographic signing failed: " + err.message);

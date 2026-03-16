@@ -93,7 +93,7 @@ export async function generateKeys() {
     );
 }
 
-export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom-Right') {
+export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom-Right', issuerAuthData = null) {
     // 1. Extract digital text from the original PDF
     const extractedText = await extractTextFromPdfBytes(fileBuffer, false);
     const textEncoder = new TextEncoder();
@@ -117,7 +117,7 @@ export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom
     await saveKeyToBackend(docId, exportedPublicKey);
 
     // 5. Construct QR Payload
-    const payloadJson = JSON.stringify({ docId: docId, hash: docHashHex, sig: signatureBase64 });
+    const payloadJson = JSON.stringify({ docId: docId, hash: docHashHex, sig: signatureBase64, appended: qrPlacement === 'New Page (Appended)' });
     
     // Generate QR Data URL using a temporary DOM element (standard qrcode.js behavior)
     const tempDiv = document.createElement('div');
@@ -127,7 +127,51 @@ export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom
     await new Promise(r => setTimeout(r, 100));
     const qrCanvas = tempDiv.querySelector('canvas');
     if (!qrCanvas) throw new Error("QR Generation failed");
-    const qrImageDataUrl = qrCanvas.toDataURL('image/png');
+    
+    // --- Badge Enrichment (Fixes Bug 2 & 1) ---
+    const badgeCanvas = document.createElement('canvas');
+    badgeCanvas.width = 800;
+    badgeCanvas.height = 250;
+    const ctx = badgeCanvas.getContext('2d');
+    
+    // Draw white background
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, badgeCanvas.width, badgeCanvas.height);
+    
+    // Draw Border
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "#4F46E5"; // Primary color
+    ctx.strokeRect(2, 2, badgeCanvas.width - 4, badgeCanvas.height - 4);
+
+    // Draw QR Code with a 20px quiet zone offset to prevent border interference
+    ctx.drawImage(qrCanvas, 20, 0, 250, 250);
+    
+    // Draw Text
+    ctx.fillStyle = "#111827"; // Text color
+    ctx.font = "bold 32px sans-serif";
+    ctx.fillText("DocCrypt Verified Seal", 290, 60);
+
+    
+    ctx.font = "24px sans-serif";
+    
+    // Robust name extraction to prevent 'undefined' for old mock users
+    let issuerName = 'Unknown Issuer';
+    if (issuerAuthData) {
+        if (issuerAuthData.type === 'Organization') {
+            issuerName = issuerAuthData.orgName || issuerAuthData.name || 'Unknown Org';
+        } else {
+            const first = issuerAuthData.firstName || '';
+            const last = issuerAuthData.lastName || '';
+            issuerName = `${first} ${last}`.trim();
+            if (!issuerName) issuerName = issuerAuthData.name || 'Unknown Individual';
+        }
+    }
+
+    ctx.fillText(`Issued By: ${issuerName}`, 290, 110);
+    ctx.fillText(`Date: ${new Date().toLocaleString()}`, 290, 150);
+    ctx.fillText(`Doc ID: ${docId}`, 290, 190);
+
+    const qrImageDataUrl = badgeCanvas.toDataURL('image/png');
     
     // 6. Embed in PDF
     const { PDFDocument, rgb } = window.PDFLib;
@@ -137,9 +181,9 @@ export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom
     if (qrPlacement === 'New Page (Appended)') {
         page = pdfDoc.addPage();
     } else {
-        // Just append to the last page for simplicity
+        // Place inline stamps on the FIRST page
         const pages = pdfDoc.getPages();
-        page = pages[pages.length - 1];
+        page = pages[0];
     }
 
     const { width, height } = page.getSize();
@@ -149,29 +193,24 @@ export async function signAndStampPDF(fileBuffer, keyPair, qrPlacement = 'Bottom
     let qrX = 50;
     let qrY = 50;
     
+    const scaleFactor = 0.35;
+    const qrDims = qrImage.scale(scaleFactor);
+    
     if (qrPlacement === 'Bottom-Right') {
-        qrX = width - 150;
+        qrX = width - qrDims.width - 50;
         qrY = 50;
     } else if (qrPlacement === 'Top-Right') {
-        qrX = width - 150;
-        qrY = height - 150;
+        qrX = width - qrDims.width - 50;
+        qrY = height - qrDims.height - 50;
     } else if (qrPlacement === 'Top-Left') {
         qrX = 50;
-        qrY = height - 150;
+        qrY = height - qrDims.height - 50;
     } else if (qrPlacement === 'New Page (Appended)') {
-        qrX = width / 2 - 50;
+        qrX = (width - qrDims.width) / 2;
         qrY = height / 2;
     }
 
-    const qrDims = qrImage.scale(0.5);
-    
     page.drawImage(qrImage, { x: qrX, y: qrY, width: qrDims.width, height: qrDims.height });
-    
-    // If it's a new page, write some text, else keep it subtle
-    if (qrPlacement === 'New Page (Appended)') {
-        page.drawText('DocCrypt Text-Content Verification Stamp', { x: 50, y: height / 2 - 120, size: 16, color: rgb(0, 0, 0) });
-        page.drawText(`Document ID: ${docId}`, { x: 50, y: height / 2 - 150, size: 10 });
-    }
     
     const pdfBytes = await pdfDoc.save();
     return new Blob([pdfBytes], { type: 'application/pdf' });
@@ -223,14 +262,27 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
                     const loadingTask = window.pdfjsLib.getDocument({ data: new Uint8Array(verifyPdfArrayBuffer) });
                     const pdfDocument = await loadingTask.promise;
                     const numPages = pdfDocument.numPages;
-                    // Usually stamp is on the last page
-                    const page = await pdfDocument.getPage(numPages);
-                    const viewport = page.getViewport({ scale: 2.0 }); 
+                    
+                    // 1. Scan the LAST page first (for Appended pages)
+                    let page = await pdfDocument.getPage(numPages);
+                    let viewport = page.getViewport({ scale: 2.0 }); 
                     
                     canvas.height = viewport.height;
                     canvas.width = viewport.width;
                     await page.render({ canvasContext: ctx, viewport: viewport }).promise;
                     code = scanCanvasForQR(canvas, ctx);
+
+                    // 2. If not found, scan the FIRST page (for inline stamps like Top-Right)
+                    if (!code && numPages > 1) {
+                        setStatusCallback("QR not on last page, checking first page...");
+                        page = await pdfDocument.getPage(1);
+                        viewport = page.getViewport({ scale: 2.0 }); 
+                        
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+                        await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                        code = scanCanvasForQR(canvas, ctx);
+                    }
                 } catch (pdfJsError) {
                     return resolve({ success: false, error: "Failed to parse PDF for QR code scanning.", resultData: null });
                 }
@@ -268,14 +320,11 @@ export async function verifyDocumentContent(fileUpload, setStatusCallback) {
 
             if (verifyPdfArrayBuffer) {
                 setStatusCallback("Extracting raw text from original document pages...");
-                // Extracting text from all pages EXCEPT the last page (which contains the stamp)
-                // Wait, if we just stamped the bottom right of the existing page, skipping the last page FAILS verification!
-                // We MUST skip last page ONLY if qrPlacement was "New Page (Appended)".
-                // Uh oh, `extractTextFromPdfBytes(verifyPdfArrayBuffer, false)` should be used if the stamp is inline!
-                // For simplicity, DocCrypt was using `true` previously for Phase 4. Let's just pass `false` for inline!
                 
-                // Let's do `false` (extract all pages). The QR code is an image, it doesn't affect `getTextContent()`.
-                const extractedText = await extractTextFromPdfBytes(verifyPdfArrayBuffer, false);
+                // If the stamp was appended as a new page, we MUST skip the last page during extraction
+                // to match the original document text hash exactly without trailing empty page newlines.
+                const shouldSkipLast = payload.appended === true;
+                const extractedText = await extractTextFromPdfBytes(verifyPdfArrayBuffer, shouldSkipLast);
                 
                 const textEncoder = new TextEncoder();
                 verificationArrayBuffer = textEncoder.encode(extractedText);
