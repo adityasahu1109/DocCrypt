@@ -1,16 +1,41 @@
-# React + Vite
+# DocCrypt Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This directory contains the React (Vite-powered) frontend for DocCrypt — a decentralized document signing and cryptographic verification platform.
 
-Currently, two official plugins are available:
+## 🛠️ Tech Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Framework:** React 19
+- **Bundler:** Vite
+- **Styling:** Tailwind CSS v4
+- **Routing:** React Router v7
+- **Crypto & Hash:** Native Web Crypto API
+- **PDF Manipulation:** `pdf-lib`
+- **QR Operations:** `jsQR` & `qrcode.js` natively or injected
 
-## React Compiler
+## 🚀 Getting Started
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+To launch the frontend locally for development:
 
-## Expanding the ESLint configuration
+1. **Install Dependencies**
+   Navigate to this directory and install required npm packages:
+   ```bash
+   cd frontend
+   npm install
+   ```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+2. **Start the Development Server**
+   ```bash
+   npm run dev
+   ```
+   *The application will typically map to `http://localhost:5173`.*
+
+## 📁 Core Directory Structure
+
+- `src/components/`: Modular reusable React components (Buttons, Cards, Navbars).
+- `src/context/`: Contains `AuthContext.jsx` handling mock states for user authentication.
+- `src/pages/`: Main view logic mapping to paths (`Landing`, `Auth`, `Dashboard`, `Verify`).
+- `src/utils/crypto.js`: The central "engine" performing natively abstracted Web Crypto signing, verification, and `pdf-lib` PDF stamping logic.
+
+## 🔗 Connection to Backend
+
+This frontend interface corresponds directly to the Python/FastAPI service found within the `backend/` directory. By default, `crypto.js` and `AuthContext.jsx` are configured to point to `http://localhost:8080`.

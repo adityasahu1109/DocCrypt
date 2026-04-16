@@ -1,0 +1,9 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+env/
+
+# NOTE: SQLite databases (*.db) are NOT ignored here as per project structure requirements for testing.
